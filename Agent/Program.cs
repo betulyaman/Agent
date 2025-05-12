@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 class Program
 {
@@ -53,68 +54,67 @@ class Program
     }
 
     [DllImport(DllName, CharSet = CharSet.Unicode)]
-    public static extern int filter_connect_communication_port(ref IntPtr portHandle, string portName);
+    public static extern int filter_connect_communication_port(string portName, ref uint context, uint contextSize, out SafeFileHandle portHandle);
 
     [DllImport(DllName)]
-    public static extern int filter_get_message(IntPtr portHandle, IntPtr messageBuffer, uint messageBufferSize);
+    public static extern int filter_get_message(SafeFileHandle portHandle, IntPtr messageBuffer, uint messageBufferSize);
 
     [DllImport(DllName)]
-    public static extern int filter_send_message(IntPtr portHandle, ref USER_REPLY inputBuffer, uint inputBufferSize);
+    public static extern int filter_send_message(SafeFileHandle portHandle, ref USER_REPLY inputBuffer, uint inputBufferSize);
 
     [DllImport(DllName)]
-    public static extern int filter_disconnect(IntPtr portHandle);
+    public static extern int filter_disconnect(SafeFileHandle portHandle);
 
     [DllImport("fltuser_wrapper.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
     public static extern int filter_get_dos_name(string volume_name, [MarshalAs(UnmanagedType.LPWStr)] StringBuilder dos_name, uint dos_name_size);
 
-    static void SplitDeviceAndPath(string fullPath, out string deviceName, out string remainingPath)
+    private static bool SplitDeviceAndPath(string ntPath, out string deviceName, out string remainingPath)
     {
-        deviceName = "";
-        remainingPath = "";
+        deviceName = string.Empty;
+        remainingPath = string.Empty;
 
-        int slashCount = 0;
-        int i = 0;
+        if (string.IsNullOrWhiteSpace(ntPath))
+            return false;
 
-        for (; i < fullPath.Length; i++)
-        {
-            if (fullPath[i] == '\\')
-            {
-                slashCount++;
-                if (slashCount == 3)
-                    break;
-            }
-        }
+        // NT device paths usually start with: \Device\HarddiskVolumeX\...
+        // We find the second backslash *after* the device name start.
+        const string prefix = @"\Device\";
 
-        if (slashCount < 3)
-        {
-            deviceName = fullPath;
-            remainingPath = "";
-        }
-        else
-        {
-            deviceName = fullPath.Substring(0, i);
-            remainingPath = fullPath.Substring(i);
-        }
+        if (!ntPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        int secondSlashIndex = ntPath.IndexOf('\\', prefix.Length);
+        if (secondSlashIndex == -1)
+            return false;
+
+        deviceName = ntPath.Substring(0, secondSlashIndex);
+        remainingPath = ntPath.Substring(secondSlashIndex);
+
+        return true;
     }
+
 
     static void Main()
     {
+        const uint ExpectedToken = 0xA5A5A5A5;
+
         int result;
 
-        IntPtr port = IntPtr.Zero;
+        SafeFileHandle port;
         Console.WriteLine($"Trying to connect to port: {COMMUNICATION_PORT_NAME}");
         while (true)
         {
-            result = filter_connect_communication_port(ref port, COMMUNICATION_PORT_NAME);
-            if (result == 0)
+            uint token = ExpectedToken;
+            result = filter_connect_communication_port(COMMUNICATION_PORT_NAME, ref token, (uint)Marshal.SizeOf(typeof(uint)), out port);
+            if (result != 0 || port.IsInvalid) {
+                Console.WriteLine($"Connection failed: 0x{result:X8}. Retrying...");
+                //error 0x8007005 indicates that the system user lacks permissions
+                System.Threading.Thread.Sleep(1000);
+            }
+            else 
             {
                 Console.WriteLine("Connected to filter.");
                 break;
-            }
-            else
-            {
-                Console.WriteLine($"Connection failed: 0x{result:X8}. Retrying...");
-                System.Threading.Thread.Sleep(1000);
             }
         }
 
@@ -202,17 +202,16 @@ class Program
 
     static string FormatPath(string fullPath)
     {
-        SplitDeviceAndPath(fullPath, out string deviceName, out string remainingPath);
-
-        StringBuilder dosName = new StringBuilder(256);
-        long result = filter_get_dos_name(deviceName, dosName, 256);
-        if (result != 0)
-        {
+        if (!SplitDeviceAndPath(fullPath, out string deviceName, out string remainingPath)) {
             return fullPath;
         }
-        else
-        {
-            return dosName + remainingPath;
+
+        StringBuilder dosName = new StringBuilder(256);
+        long result = filter_get_dos_name(deviceName, dosName, (uint)dosName.Capacity);
+        if (result != 0) {
+            return fullPath;
         }
+
+        return dosName.ToString() + remainingPath;
     }
 }
