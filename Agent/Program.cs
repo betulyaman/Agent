@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 class Program
@@ -65,7 +67,11 @@ class Program
     [DllImport(DllName)]
     public static extern int filter_disconnect(SafeFileHandle portHandle);
 
-    [DllImport("fltuser_wrapper.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
+    [DllImport(DllName)]
+    public static extern int filter_reply_message(SafeFileHandle portHandle, ref USER_REPLY inputBuffer, uint inputBufferSize);
+
+
+    [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall)]
     public static extern int filter_get_dos_name(string volume_name, [MarshalAs(UnmanagedType.LPWStr)] StringBuilder dos_name, uint dos_name_size);
 
     private static bool SplitDeviceAndPath(string ntPath, out string deviceName, out string remainingPath)
@@ -163,20 +169,36 @@ class Program
 
                 Console.WriteLine("\nY or N?");
                 bool allow = false;
-                while (true)
-                {
-                    var key = Console.ReadKey(intercept: false).KeyChar;
-                    if (key == 'y' || key == 'Y')
-                    {
-                        allow = true;
-                        break;
-                    }
-                    else if (key == 'n' || key == 'N')
-                    {
-                        allow = false;
-                        break;
-                    }
+                bool inputReceived = false;
+                int timeoutMilliseconds = 10000; // 10 seconds
 
+                Task inputTask = Task.Run(() =>
+                {
+                    while (!inputReceived)
+                    {
+                        if (Console.KeyAvailable)
+                        {
+                            var key = Console.ReadKey(intercept: false).KeyChar;
+                            if (key == 'y' || key == 'Y')
+                            {
+                                allow = true;
+                                inputReceived = true;
+                            }
+                            else if (key == 'n' || key == 'N')
+                            {
+                                allow = false;
+                                inputReceived = true;
+                            }
+                        }
+                        Thread.Sleep(100); // avoid busy waiting
+                    }
+                });
+
+                if (!inputTask.Wait(timeoutMilliseconds))
+                {
+                    Console.WriteLine("\n[Timeout] No response from user. Denying by default.");
+                    allow = false;
+                    inputReceived = true;
                 }
 
                 USER_REPLY reply = new USER_REPLY
@@ -185,7 +207,7 @@ class Program
                     allow = (allow ? true : false)
                 };
 
-                hresult = filter_send_message(port, ref reply, (uint)Marshal.SizeOf<USER_REPLY>());
+                hresult = filter_reply_message(port, ref reply, (uint)Marshal.SizeOf<USER_REPLY>());
                 if (hresult != 0)
                 {
                     Console.WriteLine($"filter_send_message failed: 0x{hresult:X8}");
