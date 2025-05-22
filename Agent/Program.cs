@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
+using System.IO;
 
 class Program
 {
@@ -56,7 +57,7 @@ class Program
     }
 
     [DllImport(DllName, CharSet = CharSet.Unicode)]
-    public static extern int filter_connect_communication_port(string portName, ref uint context, uint contextSize, out SafeFileHandle portHandle);
+    public static extern int filter_connect_communication_port(string portName, ref ConnectContext context, uint contextSize, out SafeFileHandle portHandle);
 
     [DllImport(DllName)]
     public static extern int filter_get_message(SafeFileHandle portHandle, IntPtr messageBuffer, uint messageBufferSize);
@@ -99,10 +100,22 @@ class Program
         return true;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ConnectContext
+    {
+        public uint Token;
+        public int Value;
+    }
 
     static void Main()
     {
+        int nProcessID = System.Diagnostics.Process.GetCurrentProcess().Id;
         const uint ExpectedToken = 0xA5A5A5A5;
+        ConnectContext context = new ConnectContext
+        {
+            Token = ExpectedToken,
+            Value = nProcessID
+        };
 
         int result;
 
@@ -110,8 +123,7 @@ class Program
         Console.WriteLine($"Trying to connect to port: {COMMUNICATION_PORT_NAME}");
         while (true)
         {
-            uint token = ExpectedToken;
-            result = filter_connect_communication_port(COMMUNICATION_PORT_NAME, ref token, (uint)Marshal.SizeOf(typeof(uint)), out port);
+            result = filter_connect_communication_port(COMMUNICATION_PORT_NAME, ref context, (uint)Marshal.SizeOf(typeof(ConnectContext)), out port);
             if (result != 0 || port.IsInvalid) {
                 Console.WriteLine($"Connection failed: 0x{result:X8}. Retrying...");
                 //error 0x8007005 indicates that the system user lacks permissions
@@ -124,8 +136,13 @@ class Program
             }
         }
 
+
         int size = Marshal.SizeOf<GET_MESSAGE>();
         IntPtr messageBuffer = Marshal.AllocHGlobal(size);
+
+        Console.WriteLine("File Path: ");
+        string file_path = Console.ReadLine();
+        File.Delete(file_path);
 
         try
         {
@@ -196,7 +213,7 @@ class Program
 
                 if (!inputTask.Wait(timeoutMilliseconds))
                 {
-                    Console.WriteLine("\n[Timeout] No response from user. Denying by default.");
+                    Console.WriteLine($"\n[Timeout: OP_ID: {message.body.operation_id}] No response from user. Denying by default.");
                     allow = false;
                     inputReceived = true;
                 }
@@ -207,7 +224,7 @@ class Program
                     allow = (allow ? true : false)
                 };
 
-                hresult = filter_reply_message(port, ref reply, (uint)Marshal.SizeOf<USER_REPLY>());
+                hresult = filter_send_message(port, ref reply, (uint)Marshal.SizeOf<USER_REPLY>());
                 if (hresult != 0)
                 {
                     Console.WriteLine($"filter_send_message failed: 0x{hresult:X8}");
